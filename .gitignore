@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+logs/
+.pytest_cache/
+.DS_Store
+Thumbs.db
+.idea/
+# 수업 코드와 무관한 개인 연결 시험 파일
+first_request.py
