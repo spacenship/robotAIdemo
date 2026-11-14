@@ -18,37 +18,83 @@
 
 이 프로그램은 **주변 칸 정보를 텍스트로 입력하는 LLM 에이전트**입니다. 이미지 입력을 받는 VLA 모델이나 실제 로봇 제어는 구현하지 않았습니다. 모델을 학습시키지도 않습니다.
 
-## 1. Windows에서 시작하기
+## 1. 코드 받아서 실행하기 (Windows)
 
-Python **3.11 이상**이 필요합니다. [공식 다운로드](https://www.python.org/downloads/)에서 설치 후 VS Code로 프로젝트 폴더를 엽니다. ZIP 안의 `main.py`가 프로젝트 폴더에 바로 들어가도록 압축을 풉니다. 기존 파일이 있다면 먼저 별도 폴더로 보관하세요.
+Python **3.11 이상**과 Git이 필요합니다. Python은 [공식 다운로드](https://www.python.org/downloads/)에서 설치합니다. 아래 순서는 프로젝트 폴더에서 `git init`과 `git remote add origin ...`까지 마친 상태를 기준으로 합니다.
 
-VS Code → 터미널 → 새 터미널(PowerShell):
+VS Code에서 **파일 → 폴더 열기**로 `git init`을 한 폴더를 열고, **터미널 → 새 터미널**(PowerShell)에서 차례로 실행합니다.
+
+**① 원격 주소 확인** — `origin`에 이 저장소 주소가 나오는지 봅니다.
+
+```powershell
+git remote -v
+```
+
+**② 코드 받기**
+
+```powershell
+git pull origin main
+```
+
+받은 뒤 폴더에 `main.py`, `game.py`, `README.md`가 보이면 성공입니다. 나중에 코드가 수정되면 같은 명령으로 최신 내용을 다시 받습니다.
+
+**③ 가상환경 만들고 패키지 설치** (처음 한 번)
 
 ```powershell
 python -m venv .venv
+```
+
+```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+`python`을 찾지 못하면 첫 명령을 `py -m venv .venv`로 바꿔 보세요. 가상환경 활성화 없이 `.venv`의 Python을 직접 사용하므로 PowerShell 실행 정책을 바꾸지 않아도 됩니다.
+
+**④ API 키 설정** (처음 한 번)
+
+```powershell
 Copy-Item .env.example .env
 ```
 
-`python`을 찾지 못하면 첫 명령을 `py -m venv .venv`로 바꿔 보세요. 이미 `.env`를 설정했다면 복사 명령을 다시 실행하지 마세요. 가상환경 활성화 없이 `.venv`의 Python을 직접 사용하므로 PowerShell 실행 정책을 바꾸지 않아도 됩니다.
+멘토가 준비한 Groq API 키를 받아 `.env`를 열고 `GROQ_API_KEY=` 바로 뒤에 따옴표 없이 붙여 넣고 저장합니다. 학생이 Groq에 가입할 필요는 없습니다. 본인 계정의 키를 쓰려면 [Groq API Keys](https://console.groq.com/keys)에서 발급합니다. 이미 `.env`를 설정했다면 복사 명령을 다시 실행하지 마세요.
 
-1. 멘토가 준비한 Groq API 키를 받습니다. 학생이 Groq에 가입할 필요는 없습니다. 본인 계정의 키를 쓰려면 [Groq API Keys](https://console.groq.com/keys)에서 발급합니다.
-2. `.env`를 열어 `GROQ_API_KEY=` 뒤에 키를 붙여 넣고 저장합니다.
-3. VS Code에서 `Ctrl+Shift+P` → **Python: Select Interpreter** → `.venv`를 선택합니다.
-4. 아래 첫 명령으로 실제 API 응답을 한 번 확인한 다음 게임을 실행합니다.
+**⑤ 연결 확인** — 실제 API를 한 번 호출합니다. `[실제 API 응답]`과 `action`이 출력되면 성공입니다.
 
 ```powershell
 .\.venv\Scripts\python.exe main.py --check-api
+```
+
+**⑥ 게임 실행** — 두 번째 실행부터는 이 명령만 쓰면 됩니다.
+
+```powershell
 .\.venv\Scripts\python.exe main.py
 ```
 
-키는 `.env`에만 넣습니다. `.gitignore`가 `.env`와 로그를 제외합니다. ZIP에는 키를 넣지 않았습니다. `.env`를 바꿨다면 앱을 종료하고 다시 실행하세요. 같은 이름의 OS 환경변수가 있다면 그 값이 우선합니다.
+VS Code에서 `Ctrl+Shift+P` → **Python: Select Interpreter** → `.venv`를 선택해 두면 편집기의 오류 표시도 같은 환경을 따릅니다.
 
-`python`과 `py`를 모두 찾지 못하면 Python 설치와 터미널 재시작을 확인하세요. 터미널이 프로젝트 폴더에서 열리지 않았다면 VS Code의 ‘폴더 열기’로 `main.py`가 있는 폴더를 다시 엽니다.
+키는 `.env`에만 넣습니다. `.gitignore`가 `.env`·`.venv`·로그를 제외하므로 commit·push해도 키는 올라가지 않습니다. `.env`를 바꿨다면 앱을 종료하고 다시 실행하세요. 같은 이름의 OS 환경변수가 있다면 그 값이 우선합니다.
+
+### 코드 받기가 안 될 때
+
+| 표시 | 해결 |
+|---|---|
+| `fatal: not a git repository` | 터미널이 `git init`을 한 폴더에서 열렸는지 확인합니다. VS Code의 ‘폴더 열기’로 그 폴더를 다시 엽니다. |
+| `fatal: 'origin' does not appear to be a git repository` | 원격 설정이 빠졌습니다. `git remote add origin https://github.com/spacenship/robotAIdemo.git` |
+| `git remote -v`의 주소가 다름 | `git remote set-url origin https://github.com/spacenship/robotAIdemo.git` |
+| `untracked working tree files would be overwritten` | 폴더에 같은 이름의 파일이 이미 있습니다. 그 파일을 다른 폴더로 옮긴 뒤 다시 pull합니다. |
+| `refusing to merge unrelated histories` | 이 폴더에서 이미 commit을 만든 경우입니다. 아래처럼 새 폴더에 clone으로 받는 편이 간단합니다. |
+| `python`과 `py`를 모두 찾지 못함 | Python 설치와 터미널 재시작을 확인합니다. |
+
+`git init`을 하지 않은 새 PC에서는 clone 한 번으로 받을 수 있습니다. 이때는 새로 생긴 `robotAIdemo` 폴더를 VS Code로 열고 ③부터 진행합니다.
+
+```powershell
+git clone https://github.com/spacenship/robotAIdemo.git
+```
 
 ### macOS / Linux
 
 ```bash
+git pull origin main
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 cp .env.example .env
