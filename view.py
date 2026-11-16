@@ -2,7 +2,7 @@
 from pathlib import Path
 import pygame
 
-from game import COLS, ROWS, ZOOM_ROWS, AI_ROWS, MAX_LIVES, get_observation, get_legal_actions
+from game import COLS, ROWS, ZOOM_ROWS, AI_ROWS, get_observation, get_legal_actions
 
 GREEN = "#15370D"
 SAGE = "#728E6D"
@@ -202,7 +202,7 @@ class View:
             pygame.draw.rect(screen, color, frame.inflate(grow, grow), 3, border_radius=4)
 
     def draw_result(self, screen, controller):
-        """최종 화면: 진행거리, 남은 목숨, 피한 장애물 수, 걸린 시간."""
+        """최종 화면: 진행거리, 남은 목숨, 충돌 횟수, 피한 장애물 수, 걸린 시간."""
         g = controller.game
         panel = pygame.Rect(ZOOM_X - 12, ZOOM_Y + 78, COLS * CELL + 24, 316)
         pygame.draw.rect(screen, PAPER, panel, border_radius=16)
@@ -210,11 +210,45 @@ class View:
         self.centered(screen, "완주 성공!" if g.won else "게임 오버", (panel.x, panel.y + 16, panel.width, 44),
                       30, GREEN if g.won else RED)
         lines = (f"진행거리: {g.row}/{ROWS}", f"남은 목숨: {g.lives}개",
-                 f"피한 장애물의 수: {g.dodged}개", f"걸린 시간: {format_time(controller.play_seconds)}")
+                 f"충돌 횟수: {g.collisions}회", f"피한 장애물의 수: {g.dodged}개",
+                 f"걸린 시간: {format_time(controller.play_seconds)}")
         for index, line in enumerate(lines):
-            self.text(screen, line, panel.x + 34, panel.y + 80 + index * 44, 24)
-        self.centered(screen, f"seed {g.scenario.seed}  ·  R 같은 맵 다시  ·  N 새 맵",
+            self.text(screen, line, panel.x + 34, panel.y + 72 + index * 38, 24)
+        self.centered(screen, f"{g.scenario.label}  ·  R 같은 맵 다시  ·  N 새 맵  ·  H 기록",
                       (panel.x, panel.bottom - 44, panel.width, 30), 14, MUTED)
+
+    def draw_history(self, screen, controller):
+        """H 키: 이번 실행에서 끝까지 간 주행 목록."""
+        runs = controller.runs
+        panel = pygame.Rect(592, 122, 584, 600)
+        pygame.draw.rect(screen, PAPER, panel, border_radius=16)
+        pygame.draw.rect(screen, GREEN, panel, 3, border_radius=16)
+        self.text(screen, f"주행 기록  /  끝까지 간 주행 {len(runs)}개", 612, 139, 20)
+        columns = (("#", 612), ("결과", 642), ("맵", 692), ("진행", 800), ("목숨", 852),
+                   ("충돌", 900), ("피함", 944), ("시간", 988), ("모델", 1062))
+        for name, x in columns:
+            self.text(screen, name, x, 178, 14, MUTED)
+        pygame.draw.line(screen, SAGE, (612, 200), (1156, 200), 2)
+        if not runs:
+            self.wrapped(screen, "아직 끝까지 간 주행이 없습니다.\n완주하거나 목숨이 다하면 여기에 기록됩니다.",
+                         612, 216, 540, size=16, color=MUTED, lines=3)
+        shown = runs[-19:]  # 화면에는 최근 19개까지
+        for index, run in enumerate(shown):
+            env, r = run["environment"], run["summary"]
+            y = 208 + index * 24
+            won = r["outcome"] == "완주 성공"
+            map_name = "직접 맵" if env["seed"] is None else f"seed {env['seed']}"
+            model = env["model"].split("/")[-1] if r["api_requests"] else "(직접 조종)"
+            values = (run["run"], "완주" if won else "실패", map_name, f"{r['distance']}/{ROWS}",
+                      f"{r['lives']}/{env['max_lives']}", r["collisions"], r["dodged"],
+                      format_time(r["play_seconds"]))
+            for (name, x), value in zip(columns, values):
+                self.text(screen, value, x, y, 14, (GREEN if won else RED) if name == "결과" else INK)
+            self.wrapped(screen, model, 1062, y, 96, size=14, color=MUTED, lines=1)
+        note = ("LLM 주행은 logs/test번호.json으로 바로 저장됩니다.\n"
+                "프로그램을 닫으면 위 주행 전체가 logs/session_날짜_시각.json 한 개로 저장됩니다.\n"
+                "H: 닫기")
+        self.wrapped(screen, note, 612, 668 - 14, 540, size=14, color=MUTED, lines=3)
 
     def render(self, screen, controller):
         g, s = controller.game, controller.game.scenario
@@ -223,7 +257,7 @@ class View:
         self.text(screen, "AFE 04  /  OBSERVE · DECIDE · ACT", 30, 17, 16, GOLD)
         self.wrapped(screen, s.title, 30, 47, 800, size=30, color=PAPER, lines=1)
         mode = "직접 조종 · LLM 미사용" if controller.manual else "LLM · API 연동"
-        self.text(screen, f"상태: {controller.state}  ·  seed {s.seed}", 918, 22, 18, PAPER)
+        self.text(screen, f"상태: {controller.state}  ·  {s.label}", 918, 22, 18, PAPER)
         self.text(screen, mode, 918, 57, 18, GOLD)
 
         self.card(screen, (24, 122, 548, 600))
@@ -231,10 +265,14 @@ class View:
         self.draw_zoom(screen, controller)
         self.draw_minimap(screen, g)
         self.text(screen, "목숨", MINI_X - 24, 580, 16)
-        for index in range(MAX_LIVES):
-            self.heart(screen, MINI_X + 18 + index * 28, 580, index < g.lives)
+        if s.lives <= 4:
+            for index in range(s.lives):
+                self.heart(screen, MINI_X + 18 + index * 28, 580, index < g.lives)
+        else:  # 목숨이 많으면 숫자로 표시
+            self.heart(screen, MINI_X + 18, 580, g.lives > 0)
+            self.text(screen, f"{g.lives}/{s.lives}", MINI_X + 48, 580, 16)
         self.text(screen, f"진행 {g.row}/{ROWS}", MINI_X - 24, 612, 16)
-        self.text(screen, f"피함 {g.dodged}개", MINI_X - 24, 638, 16)
+        self.text(screen, f"피함 {g.dodged}개 · 충돌 {g.collisions}회", MINI_X - 24, 638, 16)
         self.text(screen, f"초록 테: 화면 확대 구간   주황 테: AI가 보는 {COLS}×{AI_ROWS}칸", 44, 676, 14, MUTED)
         self.text(screen, "장애물: 벽돌 · 공사중 표지판   빨간 X: 부딪힌 장애물", 44, 698, 14, MUTED)
         if g.finished and not controller.moving:
@@ -243,7 +281,7 @@ class View:
         self.card(screen, (592, 122, 584, 218))
         self.text(screen, "01  관측 → 현재 상태", 612, 139, 20)
         self.wrapped(screen, s.instruction, 612, 172, 410, size=16, lines=2)
-        self.text(screen, f"진행 {g.row}/{ROWS}   목숨 {g.lives}/{MAX_LIVES}   피한 장애물 {g.dodged}개", 612, 222, 18)
+        self.text(screen, f"진행 {g.row}/{ROWS}   목숨 {g.lives}/{s.lives}   피한 장애물 {g.dodged}개", 612, 222, 18)
         self.wrapped(screen, f"현재 열: {g.col}   허용 행동: " + ", ".join(get_legal_actions(g)), 612, 254, 420, size=16, lines=1)
         self.text(screen, f"AI에 전달: {COLS}×{AI_ROWS}칸", 1040, 143, 14, MUTED)
         for r, row in enumerate(get_observation(g)["view"]):  # 지금 Space를 누르면 전송될 내용
@@ -251,7 +289,7 @@ class View:
                 rect = pygame.Rect(1048 + c * 34, 168 + r * 34, 31, 31)
                 pygame.draw.rect(screen, {"X": BRICK, "R": SAGE}.get(value, ROAD), rect, border_radius=4)
                 self.centered(screen, value, rect, 16, PAPER if value != "." else MUTED)
-        self.wrapped(screen, "제공자: GroqCloud   모델: " + controller.settings.model, 612, 286, 540, size=14, lines=1)
+        self.wrapped(screen, f"제공자: {controller.settings.label}   모델: {controller.settings.model}   (P: 전환)", 612, 286, 540, size=14, lines=1)
         elapsed = "-" if controller.last_elapsed is None else f"{controller.last_elapsed:.2f}초"
         self.text(screen, f"API {controller.request_count}회 · 직전 응답 {elapsed} · 누적 시간 {format_time(controller.play_seconds)}", 612, 310, 14, MUTED)
 
@@ -279,7 +317,9 @@ class View:
             self.wrapped(screen, row, 888, 606 + index * 21, 268, size=14, color=RED if h["result"] != "safe" else MUTED, lines=1)
 
         pygame.draw.rect(screen, GREEN, (0, 740, 1200, 80))
-        self.text(screen, "SPACE  AI 한 턴    R  같은 맵 다시    N  새 맵    F5  설정 다시 읽기    M  직접 조종    ESC  종료", 30, 754, 18, PAPER)
+        if controller.show_history:
+            self.draw_history(screen, controller)
+        self.text(screen, "SPACE AI 한 턴    R 같은 맵 다시    N 새 맵    F5 설정 다시 읽기    M 직접 조종    H 주행 기록    P API 전환    ESC 종료", 30, 756, 16, PAPER)
         note = "3×3칸을 텍스트로 읽는 LLM 에이전트입니다. 걸린 시간은 AI 통신·로봇 이동 시간만 셉니다."
         if controller.busy:
             note = "API 응답을 기다리는 중에는 맵·모드를 변경할 수 없습니다."

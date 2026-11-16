@@ -7,10 +7,14 @@ import random
 COLS, ROWS = 3, 10        # 전체 맵: 가로 3칸 × 세로 10칸
 ZOOM_ROWS = 5             # 화면에 확대해 보여 주는 구간: 3×5칸 (로봇 줄 포함)
 AI_ROWS = 3               # AI에게 넘기는 구간: 3×3칸 (로봇 줄 + 앞 2줄)
-MAX_LIVES = 3
+MAX_LIVES = 3             # 기본 목숨 수. scenario.json의 "lives"나 --lives로 바꿀 수 있습니다.
+LIVES_LIMIT = 10          # 설정할 수 있는 최대 목숨 수
 START_COL = 1             # 가운데 열에서 출발
 DOUBLE_CHANCE = 0.4       # 한 줄에 장애물이 2개 나올 확률 (직전 줄이 2개면 0)
 KINDS = ("brick", "sign")  # 벽돌 / 공사중 표지판
+# 맵을 글자로 적을 때 쓰는 기호 (scenario.json의 "map", 주행 기록 파일)
+MAP_CHARS = {"B": "brick", "S": "sign", "X": "brick", ".": None}
+KIND_CHARS = {"brick": "B", "sign": "S", None: "."}
 
 # 열 번호: 0=왼쪽, 1=가운데, 2=오른쪽. 값은 열이 바뀌는 양입니다.
 ACTIONS = {"left": -1, "right": 1, "stay": 0}
@@ -44,30 +48,66 @@ def generate_map(seed: int):
                  for cols in blocked_rows)
 
 
+def parse_map(rows):
+    """직접 적은 맵을 grid로 바꿉니다. 첫 줄이 로봇과 가장 가까운 1번째 줄입니다.
+
+    예: ["B..", ".S.", ...] — B=벽돌, S=공사중 표지판, X=벽돌, .=빈칸.
+    장애물 생성 규칙은 검사하지 않으므로, 일부러 피할 수 없는 맵도 만들 수 있습니다.
+    """
+    if (not isinstance(rows, list) or len(rows) != ROWS
+            or not all(isinstance(row, str) and len(row) == COLS for row in rows)):
+        raise ValueError(f"map은 {COLS}글자 문자열 {ROWS}줄이어야 합니다.")
+    try:
+        return tuple(tuple(MAP_CHARS[ch.upper()] for ch in row) for row in rows)
+    except KeyError:
+        raise ValueError("map에는 B(벽돌), S(표지판), X(벽돌), .(빈칸)만 쓸 수 있습니다.") from None
+
+
+def map_to_text(grid):
+    """grid를 1번째 줄부터 "B.S" 같은 문자열 목록으로 바꿉니다."""
+    return ["".join(KIND_CHARS[cell] for cell in row) for row in grid]
+
+
 @dataclass(frozen=True)
 class Scenario:
     title: str
     instruction: str
-    seed: int
+    seed: int | None          # 직접 적은 맵이면 None
     grid: tuple
+    lives: int = MAX_LIVES
+    file_map: tuple = ()      # scenario.json에 적혀 있던 (seed, map). F5에서 바뀌었는지 비교합니다.
+
+    @property
+    def label(self):
+        return "직접 만든 맵" if self.seed is None else f"seed {self.seed}"
 
 
-def load_scenario(path: Path, seed: int | None = None) -> Scenario:
-    """scenario.json을 읽습니다. seed 인자가 있으면 파일의 seed보다 우선합니다.
+def load_scenario(path: Path, seed: int | None = None, lives: int | None = None) -> Scenario:
+    """scenario.json을 읽습니다. seed·lives 인자가 있으면 파일의 값보다 우선합니다.
 
-    파일의 seed가 null이면 실행할 때마다 새 seed를 뽑습니다(화면·로그에 표시).
+    맵을 정하는 순서: seed 인자 > 파일의 "map"(직접 적은 맵) > 파일의 "seed".
+    파일의 seed가 null이면 실행할 때마다 새 seed를 뽑습니다(화면·기록 파일에 표시).
     """
     data = json.loads(path.read_text(encoding="utf-8-sig"))
     for key, maximum in (("title", 40), ("instruction", 1000)):
         if not isinstance(data.get(key), str) or not 1 <= len(data[key].strip()) <= maximum:
             raise ValueError(f"{key}는 1~{maximum}자 문자열이어야 합니다.")
+    if lives is None:
+        lives = data.get("lives", MAX_LIVES)
+    if type(lives) is not int or not 1 <= lives <= LIVES_LIMIT:
+        raise ValueError(f"lives(목숨)는 1~{LIVES_LIMIT} 사이 정수여야 합니다.")
+    file_seed, file_rows = data.get("seed"), data.get("map")
+    custom = None if file_rows is None else parse_map(file_rows)
+    file_map = (file_seed, None if custom is None else tuple(file_rows))
+    if seed is None and custom is not None:
+        return Scenario(data["title"], data["instruction"], None, custom, lives, file_map)
     if seed is None:
-        seed = data.get("seed")
+        seed = file_seed
     if seed is None:
         seed = random.randrange(1_000_000)
     if type(seed) is not int or not 0 <= seed <= 999_999_999:
         raise ValueError("seed는 0~999999999 사이 정수 또는 null이어야 합니다.")
-    return Scenario(data["title"], data["instruction"], seed, generate_map(seed))
+    return Scenario(data["title"], data["instruction"], seed, generate_map(seed), lives, file_map)
 
 
 @dataclass
@@ -75,11 +115,19 @@ class Game:
     scenario: Scenario
     col: int = START_COL
     row: int = 0              # 진행거리. 0은 출발선, 1~ROWS는 맵의 줄
-    lives: int = MAX_LIVES
-    dodged: int = 0           # 피한 장애물 수
+    lives: int | None = None  # 비워 두면 scenario.lives로 시작
+    dodged: int = 0           # 피한 장애물 수 (부딪힌 줄의 장애물은 세지 않습니다)
     hits: set = field(default_factory=set)  # 부딪힌 칸 (row, col)
     history: list = field(default_factory=list)
     last_feedback: str = "아직 행동하지 않았습니다."
+
+    def __post_init__(self):
+        if self.lives is None:
+            self.lives = self.scenario.lives
+
+    @property
+    def collisions(self):
+        return len(self.hits)
 
     def cell(self, row: int, col: int):
         """맵 밖(출발선·결승선 너머)은 빈칸입니다."""
@@ -141,7 +189,9 @@ def apply_action(game: Game, action: str, reason: str, source: str = "LLM") -> d
         game.lives -= 1
         game.hits.add((game.row, game.col))
         feedback += f" 장애물에 부딪혀 목숨이 {game.lives}개 남았습니다."
-    game.dodged += obstacles - collided
+    else:
+        # 부딪힌 줄은 옆 칸에 다른 장애물이 있었더라도 '피한 장애물'로 세지 않습니다.
+        game.dodged += obstacles
     if game.lives <= 0:
         feedback += " 목숨을 모두 잃었습니다."
     elif game.won:

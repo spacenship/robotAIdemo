@@ -1,15 +1,18 @@
 """네트워크 대신 MockTransport를 사용. 실제 모델 응답 품질 검증은 아닙니다."""
 import json
+import os
 from pathlib import Path
+from unittest import mock
 from threading import Event
 import time
+import tempfile
 from types import SimpleNamespace
 import unittest
 
 import httpx
 
 from game import Game, load_scenario, get_observation
-from llm_client import Settings, RobotLLM, Decision, DecisionError
+from llm_client import Settings, RobotLLM, Decision, DecisionError, PROVIDERS, load_settings
 from main import Controller, is_key, RESET_CHARS, MANUAL_CHARS, NEW_MAP_CHARS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,7 +41,33 @@ class APITests(unittest.TestCase):
         self.clients.append(client)
         return client
 
-    def test_real_sdk_sends_observation_and_strict_schema(self):
+    def test_each_provider_gets_its_own_url_key_and_model(self):
+        seen = []
+
+        def handler(request):
+            seen.append((str(request.url), request.headers["authorization"],
+                         json.loads(request.content)))
+            return httpx.Response(200, json=completion('{"action":"stay","reason":"확인"}'))
+
+        for name, info in PROVIDERS.items():
+            settings = Settings(api_key=f"key-{name}", model=f"model-{name}", provider=name)
+            client = RobotLLM(settings, http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+            self.clients.append(client)
+            self.assertEqual(client.choose_action(self.observation).action, "stay")
+            url, auth, body = seen[-1]
+            self.assertEqual((url, auth, body["model"]), (info["url"], f"Bearer key-{name}", f"model-{name}"))
+            self.assertEqual(body[info["token_param"]], settings.max_tokens)
+        self.assertIn("generativelanguage.googleapis.com", seen[-1][0])
+
+    def test_request_error_shows_server_reason_without_key(self):
+        body = [{"error": {"code": 400, "message": "API key not valid: test-key-never-real"}}]
+        client = self.make_client(lambda r: httpx.Response(400, json=body))
+        with self.assertRaises(DecisionError) as result:
+            client.choose_action(self.observation)
+        self.assertIn("API key not valid", str(result.exception))
+        self.assertNotIn("test-key-never-real", str(result.exception))
+
+    def test_request_sends_observation_and_strict_schema(self):
         requests = []
 
         def handler(request):
@@ -226,6 +255,136 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(controller.game.scenario.grid, grid)
         controller.reset(new_seed=True)
         self.assertIn(str(controller.game.scenario.seed), controller.message)
+
+    def test_only_finished_runs_are_saved_one_file_each(self):
+        class StayClient:
+            def choose_action(self, observation):
+                return Decision("stay", "테스트", '{"action":"stay","reason":"테스트"}', 0.01)
+
+        def play(controller, turns=99):
+            for _ in range(turns):
+                if controller.game.finished:
+                    break
+                controller.request_step()
+                wait_until_idle(controller)
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_dir = Path(directory) / "logs"
+            controller = Controller(ROOT / "scenario.json", StayClient(),
+                                    Settings(api_key="test-key", min_interval=0),
+                                    seed=7, log_dir=log_dir)
+            controller.move_seconds = 0.01
+
+            play(controller, turns=2)          # 중간에 끊은 주행은 저장하지 않습니다.
+            controller.reset(reload_map=True)
+            controller.toggle_manual()         # 직접 조종만 한 판도 저장하지 않습니다.
+            while not controller.game.finished:
+                controller.manual_step("stay")
+                wait_until_idle(controller)
+            controller.toggle_manual()
+            self.assertFalse(log_dir.exists())
+
+            controller.reset()
+            play(controller)
+            self.assertTrue(controller.game.finished)
+            self.assertEqual([p.name for p in log_dir.iterdir()], ["test1.json"])
+            self.assertIn("test1.json", controller.message)
+            run = json.loads((log_dir / "test1.json").read_text(encoding="utf-8"))
+            game = controller.game
+            self.assertEqual(run["environment"]["seed"], 7)
+            self.assertEqual(len(run["environment"]["map"]), 10)
+            self.assertEqual(run["summary"]["distance"], game.row)
+            self.assertEqual(run["summary"]["lives"], game.lives)
+            self.assertEqual(run["summary"]["outcome"], "완주 성공" if game.won else "게임 오버")
+            self.assertEqual(len(run["turns"]), len(game.history))
+            self.assertEqual(run["turns"][0]["action"], "stay")
+            self.assertEqual(run["turns"][0]["result"]["turn"], 1)
+            self.assertNotIn("test-key", json.dumps(run))
+
+            controller.reset()                 # 다음 주행은 다음 번호로, 기존 파일은 그대로
+            play(controller)
+            self.assertEqual(sorted(p.name for p in log_dir.iterdir()), ["test1.json", "test2.json"])
+            self.assertEqual(json.loads((log_dir / "test1.json").read_text(encoding="utf-8")), run)
+
+            # 주행 목록(H 화면)에는 직접 조종 판까지 3개, 종료 시 한 파일로 저장
+            self.assertEqual([r["summary"]["mode"] for r in controller.runs], ["직접 조종", "LLM", "LLM"])
+            self.assertEqual([r.get("file") for r in controller.runs], [None, "test1.json", "test2.json"])
+            path = controller.save_session()
+            self.assertRegex(path.name, r"^session_\d{8}_\d{6}\.json$")
+            session = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(session["run_count"], 3)
+            self.assertEqual(session["runs"][1]["summary"], run["summary"])
+            self.assertEqual(len(session["runs"][0]["turns"]), session["runs"][0]["summary"]["turns"])
+
+    def test_no_session_file_without_finished_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            controller = Controller(ROOT / "scenario.json", Unused(), Settings(api_key="k"),
+                                    log_dir=Path(directory) / "logs")
+            self.assertIsNone(controller.save_session())
+            self.assertFalse((Path(directory) / "logs").exists())
+
+    def test_f5_keeps_the_current_map_unless_the_file_map_changed(self):
+        data = json.loads((ROOT / "scenario.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scenario.json"
+
+            def write(**changes):
+                data.update(changes)
+                path.write_text(json.dumps(data), encoding="utf-8")
+
+            write(seed=42)
+            controller = Controller(path, Unused(), Settings(api_key="k"), log_dir=None)
+            controller.reset(new_seed=True)
+            scenario = controller.game.scenario
+            write(instruction="새 지시문", lives=5)
+            controller.reset(reload_map=True)       # 설정만 바뀌고 맵은 그대로
+            after = controller.game.scenario
+            self.assertEqual((after.seed, after.grid), (scenario.seed, scenario.grid))
+            self.assertEqual((after.instruction, after.lives, controller.game.lives), ("새 지시문", 5, 5))
+            write(seed=7)
+            controller.reset(reload_map=True)       # 파일의 seed를 고치면 그 맵으로
+            self.assertEqual(controller.game.scenario.seed, 7)
+            rows = ["B.."] * 10
+            write(map=rows)
+            controller.reset(reload_map=True)       # 직접 만든 맵
+            self.assertIsNone(controller.game.scenario.seed)
+            controller.reset(new_seed=True)
+            self.assertIsNotNone(controller.game.scenario.seed)
+            write(map="잘못된 맵")
+            controller.reset(reload_map=True)       # 설정 오류면 게임은 그대로
+            self.assertTrue(controller.error)
+            self.assertIn("설정 오류", controller.message)
+            self.assertIsNotNone(controller.game.scenario.seed)
+
+            fixed = Controller(path.parent / "scenario.json", Unused(), Settings(api_key="k"),
+                               seed=3, lives=2, log_dir=None) if write(map=None) is None else None
+            self.assertEqual((fixed.game.scenario.seed, fixed.game.lives), (3, 2))  # 명령줄 값이 우선
+            fixed.reset(new_seed=True)
+            self.assertEqual(fixed.game.lives, 2)
+
+    def test_switching_provider(self):
+        env = {"GROQ_API_KEY": "groq-test", "GEMINI_API_KEY": "", "GEMINI_MODEL": "gemini-test",
+               "LLM_PROVIDER": ""}
+        with mock.patch.dict(os.environ, env), mock.patch("llm_client.load_dotenv"):
+            settings = load_settings()
+            self.assertEqual((settings.provider, settings.label), ("groq", "GroqCloud"))
+            controller = make_controller(RobotLLM(settings), settings)
+            controller.toggle_manual()
+            controller.manual_step("stay")
+            wait_until_idle(controller)
+            controller.toggle_manual()
+            controller.switch_provider()            # 진행 중이던 주행은 처음부터
+            self.assertEqual((controller.settings.provider, controller.settings.model),
+                             ("gemini", "gemini-test"))
+            self.assertEqual(controller.game.row, 0)
+            self.assertIn("GEMINI_API_KEY", controller.message)
+            self.assertFalse(controller.request_step())  # 키가 없으면 요청하지 않음
+            controller.switch_provider()
+            self.assertEqual(controller.settings.provider, "groq")
+            self.assertEqual(controller.state, "준비")
+            controller.llm.close()
+            with self.assertRaisesRegex(ValueError, "LLM_PROVIDER"):
+                load_settings("없는제공자")
 
     def test_keys_accept_hangul_input(self):
         r_key, m_key, n_key = 114, 109, 110  # pygame.K_r, pygame.K_m, pygame.K_n

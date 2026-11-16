@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 from game import (Game, Scenario, load_scenario, generate_map, get_observation, apply_action,
-                  get_legal_actions, COLS, ROWS, AI_ROWS, MAX_LIVES, START_COL)
+                  get_legal_actions, map_to_text, COLS, ROWS, AI_ROWS, MAX_LIVES, START_COL)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,7 +61,48 @@ class MapTests(unittest.TestCase):
                 load_scenario(path)
 
 
+    def write_scenario(self, directory, **changes):
+        data = json.loads((ROOT / "scenario.json").read_text(encoding="utf-8"))
+        data.update(changes)
+        path = Path(directory) / "scenario.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return path
+
+    def test_custom_lives(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_scenario(directory, lives=5)
+            self.assertEqual(Game(load_scenario(path)).lives, 5)
+            self.assertEqual(Game(load_scenario(path, lives=1)).lives, 1)  # 인자가 파일보다 우선
+            for bad in (0, 11, "3", 2.5):
+                with self.assertRaises(ValueError):
+                    load_scenario(self.write_scenario(directory, lives=bad))
+
+    def test_hand_written_map(self):
+        rows = ["B..", ".S.", "..x", "...", "BB.", "...", "SSS", "...", "...", "..."]
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_scenario(directory, map=rows)
+            scenario = load_scenario(path)
+            self.assertIsNone(scenario.seed)
+            self.assertEqual(scenario.label, "직접 만든 맵")
+            self.assertEqual(scenario.grid[0], ("brick", None, None))
+            self.assertEqual(scenario.grid[1], (None, "sign", None))
+            self.assertEqual(scenario.grid[2], (None, None, "brick"))
+            self.assertEqual(map_to_text(scenario.grid)[6], "SSS")  # 규칙 밖의 맵도 허용
+            self.assertEqual(load_scenario(path, 7).grid, generate_map(7))  # seed 인자가 우선
+            for bad in (rows[:9], rows[:9] + ["...."], rows[:9] + ["..?"], "B..", rows[:9] + [3]):
+                with self.assertRaises(ValueError):
+                    load_scenario(self.write_scenario(directory, map=bad))
+
+
 class GameTests(unittest.TestCase):
+    def test_hit_row_counts_no_dodged_obstacles(self):
+        game = make_game("XX.", "XX.")
+        entry = apply_action(game, "stay", "")  # 2개짜리 줄에서 충돌: 옆 장애물도 세지 않음
+        self.assertTrue(entry["collided"])
+        self.assertEqual((game.dodged, game.collisions, game.lives), (0, 1, MAX_LIVES - 1))
+        apply_action(game, "right", "")         # 2개짜리 줄을 피하면 2개
+        self.assertEqual((game.dodged, game.collisions), (2, 1))
+
     def test_observation_is_3x3_and_follows_the_robot(self):
         game = make_game("X..", ".X.", "..X")
         before = get_observation(game)
